@@ -1,9 +1,9 @@
 package zd.zero.waifu.motivator.plugin.integrations
 
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonObject
 import com.intellij.ide.IdeBundle
 import com.intellij.ide.plugins.PluginManagerCore
-import com.intellij.ide.ui.LafManager
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationNamesInfo
 import com.intellij.openapi.diagnostic.ErrorReportSubmitter
@@ -33,7 +33,7 @@ class ErrorReporter : ErrorReportSubmitter() {
     override fun getReportActionText(): String = "Report Anonymously"
 
     companion object {
-        private val gson = GsonBuilder().setPrettyPrinting().create()
+        private val gson = GsonBuilder().create()
         private val sentryClient: SentryClient =
             DefaultSentryClientFactory().createSentryClient(
                 Dsn(
@@ -80,6 +80,7 @@ class ErrorReporter : ErrorReportSubmitter() {
         val properties = System.getProperties()
         return event
             .withExtra("App Name", appName)
+            .withExtra("Version", WaifuMotivatorPluginState.getPluginState().version)
             .withExtra("Build Info", getBuildInfo(appInfo))
             .withExtra("JRE", getJRE(properties))
             .withExtra("VM", getVM(properties))
@@ -89,8 +90,7 @@ class ErrorReporter : ErrorReportSubmitter() {
             .withExtra("Cores", Runtime.getRuntime().availableProcessors())
             .withExtra("Registry", getRegistry())
             .withExtra("Non-Bundled Plugins", getNonBundledPlugins())
-            .withExtra("Current LAF", LafManager.getInstance().currentLookAndFeel?.name)
-            .withExtra("Plugin Config", gson.toJson(WaifuMotivatorPluginState.getPluginState()))
+            .withExtra("Plugin Config", getMinifiedConfig())
     }
 
     private fun getJRE(properties: Properties): String? {
@@ -107,12 +107,12 @@ class ErrorReporter : ErrorReportSubmitter() {
 
     private fun getNonBundledPlugins(): String? {
         return Arrays.stream(PluginManagerCore.getPlugins())
-            .filter { p -> !p.isBundled && p.isEnabled }
-            .map { p -> p.pluginId.idString }.collect(Collectors.joining(","))
+            .filter { it.isBundled.not() && it.isEnabled }
+            .map { it.pluginId.idString }.collect(Collectors.joining(","))
     }
 
     private fun getRegistry() = Registry.getAll().stream().filter { it.isChangedFromDefault }
-        .map { v -> v.key + "=" + v.asString() }.collect(Collectors.joining(","))
+        .map { "${it.key}=${it.asString()}" }.collect(Collectors.joining(","))
 
     private fun getGC() = ManagementFactory.getGarbageCollectorMXBeans().stream()
         .map { it.name }.collect(Collectors.joining(","))
@@ -135,5 +135,42 @@ class ErrorReporter : ErrorReportSubmitter() {
         val edition = ApplicationNamesInfo.getInstance().editionName
         if (edition != null) appName += " ($edition)"
         return Pair(appInfo, appName)
+    }
+
+    private fun getMinifiedConfig(): String {
+        val keyMapper = fun(s: String): String {
+            val capitals = s.codePoints()
+                .filter { Character.isUpperCase(it) }
+                .mapToObj { Character.toChars(it).joinToString() }
+                .collect(Collectors.joining())
+
+            return s[0].plus(capitals.toLowerCase())
+        }
+        val valueMapper = fun(s: String): String = when {
+            "true".equals(s, ignoreCase = true) -> "1"
+            "false".equals(s, ignoreCase = true) -> "0"
+            else -> s
+        }
+        val minifiedConfig = JsonObject()
+
+        val pluginState = WaifuMotivatorPluginState.getPluginState()
+        val root = gson.toJsonTree(pluginState).asJsonObject
+        val iterator = root.entrySet().iterator().withIndex()
+        while (iterator.hasNext()) {
+            val (index, item) = iterator.next()
+            val (key, element) = item
+            var mappedKey = keyMapper(key)
+            mappedKey =
+                if (minifiedConfig.keySet().contains(mappedKey)) "$index:${keyMapper(key)}"
+                else mappedKey
+            when {
+                element.isJsonPrimitive && element.asString.isNotEmpty() ->
+                    minifiedConfig.addProperty(mappedKey, valueMapper(element.asString))
+                element.isJsonPrimitive.not() && element.isJsonNull.not() ->
+                    minifiedConfig.add(mappedKey, element)
+            }
+        }
+
+        return minifiedConfig.toString()
     }
 }
